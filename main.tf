@@ -25,6 +25,22 @@ resource "coder_app" "selenium-grid" {
   share     = "owner"
 }
 
+resource "coder_app" "filebrowser" {
+  agent_id     = coder_agent.coder.id
+  display_name = "file browser"
+  slug         = "filebrowser"
+  url          = "http://localhost:13339"
+  icon         = "https://raw.githubusercontent.com/matifali/logos/main/database.svg"
+  subdomain    = true
+  share        = "owner"
+
+  healthcheck {
+    url       = "http://localhost:13339/healthz"
+    interval  = 3
+    threshold = 10
+  }
+}
+
 module "vscode-web" {
  source         = "registry.coder.com/modules/vscode-web/coder"
  version        = "1.0.14"
@@ -319,6 +335,9 @@ coder login ${data.coder_workspace.me.access_url} --token ${data.coder_workspace
 sudo apt-get update
 sudo apt-get install -y openjdk-11-jre
 curl https://gist.githubusercontent.com/bpmct/06424251cda8e556f2666d9881b43c2c/raw/ab29309d4827cf21f039280ead3a8014215ab36c/install_selenium_on_dogfood.sh | sh
+wait
+curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+filebrowser --noauth --root /home/coder --port 13339 >/tmp/filebrowser.log 2>&1 &
   EOT  
 }
 
