@@ -56,6 +56,17 @@ check_selenium_grid() {
             wget -q https://github.com/SeleniumHQ/selenium/releases/download/selenium-4.15.0/selenium-server-4.15.0.jar -O selenium-server.jar
         fi
         
+        # Kill any existing Chrome/Chromium processes that might be holding locks
+        print_status "Cleaning up any existing browser processes..."
+        pkill -f "chrome" || true
+        pkill -f "chromium" || true
+        sleep 2
+        
+        # Clean up old Chrome temp directories
+        print_status "Cleaning up old Chrome temp directories..."
+        rm -rf /tmp/chrome_test_* 2>/dev/null || true
+        rm -rf /tmp/.com.google.Chrome.* 2>/dev/null || true
+        
         # Start Selenium Grid in standalone mode
         print_status "Starting Selenium Grid in standalone mode..."
         java -jar selenium-server.jar standalone --port 4444 > selenium-grid.log 2>&1 &

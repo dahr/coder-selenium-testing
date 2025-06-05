@@ -9,6 +9,8 @@ import sys
 import json
 import time
 import logging
+import tempfile
+import shutil
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -215,6 +217,32 @@ class SeleniumGridTest(unittest.TestCase):
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--headless')  # Run in headless mode
         
+        # Create unique user data directory for this test session
+        import tempfile
+        self.temp_dir = tempfile.mkdtemp(prefix='chrome_test_')
+        chrome_options.add_argument(f'--user-data-dir={self.temp_dir}')
+        
+        # Additional Chrome options to prevent conflicts
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--disable-software-rasterizer')
+        chrome_options.add_argument('--disable-background-timer-throttling')
+        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+        chrome_options.add_argument('--disable-renderer-backgrounding')
+        chrome_options.add_argument('--disable-features=TranslateUI')
+        chrome_options.add_argument('--disable-ipc-flooding-protection')
+        chrome_options.add_argument('--password-store=basic')
+        chrome_options.add_argument('--use-mock-keychain')
+        chrome_options.add_argument('--force-color-profile=srgb')
+        
+        # Disable Chrome's default apps
+        chrome_options.add_argument('--disable-background-networking')
+        chrome_options.add_argument('--disable-background-mode')
+        chrome_options.add_argument('--disable-default-apps')
+        chrome_options.add_argument('--disable-sync')
+        
+        # Set window size
+        chrome_options.add_argument('--window-size=1920,1080')
+        
         try:
             self.driver = webdriver.Remote(
                 command_executor=self.grid_url,
@@ -223,6 +251,10 @@ class SeleniumGridTest(unittest.TestCase):
             self.driver.set_window_size(1920, 1080)
         except Exception as e:
             self.logger.error(f"Failed to connect to Selenium Grid: {e}")
+            # Clean up temp directory if driver creation fails
+            if hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir):
+                import shutil
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
             raise
     
     def tearDown(self):
@@ -269,7 +301,19 @@ class SeleniumGridTest(unittest.TestCase):
         
         # Close driver
         if hasattr(self, 'driver'):
-            self.driver.quit()
+            try:
+                self.driver.quit()
+            except Exception as e:
+                self.logger.error(f"Error closing driver: {e}")
+        
+        # Clean up temporary Chrome user data directory
+        if hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir):
+            import shutil
+            try:
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+                self.logger.debug(f"Cleaned up temp directory: {self.temp_dir}")
+            except Exception as e:
+                self.logger.error(f"Failed to clean up temp directory: {e}")
         
         self.logger.info(f"Test {test_name} completed: {status} ({test_duration:.2f}s)")
 
