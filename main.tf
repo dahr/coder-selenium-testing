@@ -332,12 +332,257 @@ resource "coder_agent" "coder" {
 curl -fsSL https://code-server.dev/install.sh | sh
 code-server --auth none --port 13337 >/dev/null 2>&1 &
 coder login ${data.coder_workspace.me.access_url} --token ${data.coder_workspace_owner.me.session_token}
+
+# Install required packages
 sudo apt-get update
-sudo apt-get install -y openjdk-11-jre
-curl https://gist.githubusercontent.com/bpmct/06424251cda8e556f2666d9881b43c2c/raw/ab29309d4827cf21f039280ead3a8014215ab36c/install_selenium_on_dogfood.sh | sh
-wait
+sudo apt-get install -y openjdk-11-jre wget unzip curl jq xvfb python3-venv
+
+# Install Chrome and its dependencies
+echo "Installing Chrome..."
+wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+sudo apt-get update
+
+# Install Chrome with all necessary dependencies for headless mode
+sudo apt-get install -y --no-install-recommends \
+  google-chrome-stable \
+  fonts-liberation \
+  libasound2 \
+  libatk-bridge2.0-0 \
+  libatk1.0-0 \
+  libatspi2.0-0 \
+  libcups2 \
+  libdbus-1-3 \
+  libdrm2 \
+  libgbm1 \
+  libgtk-3-0 \
+  libnspr4 \
+  libnss3 \
+  libwayland-client0 \
+  libxcomposite1 \
+  libxdamage1 \
+  libxfixes3 \
+  libxkbcommon0 \
+  libxrandr2 \
+  xdg-utils || {
+    echo "Chrome installation failed, trying alternative method..."
+    cd /tmp
+    wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+    sudo apt-get install -y -f ./google-chrome-stable_current_amd64.deb
+    rm google-chrome-stable_current_amd64.deb
+  }
+
+# Verify Chrome installation
+if ! command -v google-chrome &> /dev/null; then
+    echo "ERROR: Chrome installation failed!"
+    exit 1
+fi
+
+echo "Chrome installed successfully at: $(which google-chrome)"
+google-chrome --version
+
+# Setup Selenium
+mkdir -p /home/coder/selenium-drivers
+cd /home/coder/selenium-drivers
+
+# Get Chrome version and download matching ChromeDriver
+CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d'.' -f1)
+echo "Chrome version: $CHROME_VERSION"
+
+# Use Chrome for Testing API to get matching ChromeDriver
+CHROMEDRIVER_URL=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json" | \
+  jq -r ".versions[] | select(.version | startswith(\"$CHROME_VERSION.\")) | .downloads.chromedriver[] | select(.platform==\"linux64\") | .url" | \
+  tail -1)
+
+if [ -z "$CHROMEDRIVER_URL" ]; then
+  # Fallback to a known working version
+  CHROMEDRIVER_URL="https://storage.googleapis.com/chrome-for-testing-public/131.0.6778.87/linux64/chromedriver-linux64.zip"
+fi
+
+wget "$CHROMEDRIVER_URL" -O chromedriver-linux64.zip
+unzip chromedriver-linux64.zip
+mv chromedriver-linux64/chromedriver .
+chmod +x chromedriver
+rm -rf chromedriver-linux64*
+
+# Download GeckoDriver
+GECKO_VERSION=$(curl -s https://api.github.com/repos/mozilla/geckodriver/releases/latest | jq -r '.tag_name')
+wget "https://github.com/mozilla/geckodriver/releases/download/$GECKO_VERSION/geckodriver-$GECKO_VERSION-linux64.tar.gz"
+tar -xzf geckodriver-$GECKO_VERSION-linux64.tar.gz
+rm geckodriver-$GECKO_VERSION-linux64.tar.gz
+
+# Download Selenium Server
+wget https://github.com/SeleniumHQ/selenium/releases/download/selenium-4.23.0/selenium-server-4.23.0.jar -O selenium-server.jar
+
+# Setup Python environment
+python3 -m venv /home/coder/selenium-env
+/home/coder/selenium-env/bin/pip install selenium
+
+# Add to PATH
+export PATH=$PATH:/home/coder/selenium-drivers
+echo 'export PATH=$PATH:/home/coder/selenium-drivers' >> /home/coder/.bashrc
+
+# Start Xvfb with proper settings
+export DISPLAY=:99
+Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+
+# Wait for Xvfb to start
+sleep 2
+
+# Start Selenium Grid with Chrome options configuration
+cd /home/coder/selenium-drivers
+cat > /home/coder/selenium-config.toml << 'CONFIG'
+[node]
+detect-drivers = false
+
+[[node.driver-configuration]]
+display-name = "Chrome"
+max-sessions = 1
+webdriver-executable = "/home/coder/selenium-drivers/chromedriver"
+stereotype = '{"browserName": "chrome", "browserVersion": "131", "platformName": "linux", "goog:chromeOptions": {"binary": "/usr/bin/google-chrome", "args": ["--headless", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-web-security", "--disable-features=VizDisplayCompositor", "--window-size=1920,1080"]}}'
+CONFIG
+
+java -jar selenium-server.jar standalone --config /home/coder/selenium-config.toml > /home/coder/selenium.log 2>&1 &
+
+# Wait for Selenium to start
+sleep 5
+
+# Create test script with improved Chrome options
+cat > /home/coder/test-selenium.py << 'SCRIPT'
+#!/home/coder/selenium-env/bin/python3
+import os
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+
+# Find Chrome binary
+chrome_paths = [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium'
+]
+
+chrome_binary = None
+for path in chrome_paths:
+    if os.path.exists(path):
+        chrome_binary = path
+        break
+
+if chrome_binary:
+    print(f"Found Chrome at: {chrome_binary}")
+else:
+    print("Chrome binary not found!")
+    exit(1)
+
+chrome_options = Options()
+chrome_options.binary_location = chrome_binary
+chrome_options.add_argument('--headless=new')  # Use new headless mode
+chrome_options.add_argument('--no-sandbox')
+chrome_options.add_argument('--disable-dev-shm-usage')
+chrome_options.add_argument('--disable-gpu')
+chrome_options.add_argument('--disable-web-security')
+chrome_options.add_argument('--disable-features=VizDisplayCompositor')
+chrome_options.add_argument('--window-size=1920,1080')
+chrome_options.add_argument('--remote-debugging-port=9222')
+chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+chrome_options.add_experimental_option('useAutomationExtension', False)
+
+try:
+    print("Attempting to connect to Selenium Grid...")
+    driver = webdriver.Remote(
+        command_executor='http://localhost:4444',
+        options=chrome_options
+    )
+    driver.get("https://www.google.com")
+    print(f"Success! Page title: {driver.title}")
+    driver.quit()
+except Exception as e:
+    print(f"Error: {e}")
+    print("\nTroubleshooting tips:")
+    print("1. Check if Selenium is running: ps aux | grep selenium")
+    print("2. Check Selenium logs: tail -n 50 /home/coder/selenium.log")
+    print("3. Check if Chrome is installed: google-chrome --version")
+    print("4. Check if ChromeDriver is executable: ls -la /home/coder/selenium-drivers/chromedriver")
+SCRIPT
+chmod +x /home/coder/test-selenium.py
+
+# Create alternative test script for direct ChromeDriver connection
+cat > /home/coder/test-direct.py << 'SCRIPT'
+#!/home/coder/selenium-env/bin/python3
+import os
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+
+# Find Chrome binary
+chrome_paths = [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium'
+]
+
+chrome_binary = None
+for path in chrome_paths:
+    if os.path.exists(path):
+        chrome_binary = path
+        break
+
+if chrome_binary:
+    print(f"Found Chrome at: {chrome_binary}")
+else:
+    print("Chrome binary not found!")
+    print("Checking installed packages...")
+    os.system("dpkg -l | grep -i chrome")
+    exit(1)
+
+chrome_options = Options()
+chrome_options.binary_location = chrome_binary
+chrome_options.add_argument('--headless=new')
+chrome_options.add_argument('--no-sandbox')
+chrome_options.add_argument('--disable-dev-shm-usage')
+chrome_options.add_argument('--disable-gpu')
+chrome_options.add_argument('--window-size=1920,1080')
+
+try:
+    print("Attempting direct ChromeDriver connection...")
+    service = Service('/home/coder/selenium-drivers/chromedriver')
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    driver.get("https://www.google.com")
+    print(f"Success! Page title: {driver.title}")
+    driver.quit()
+except Exception as e:
+    print(f"Error: {e}")
+    print("\nDebugging info:")
+    os.system("which google-chrome google-chrome-stable chromium-browser chromium 2>/dev/null")
+    os.system("ls -la /usr/bin/ | grep -i chrome")
+SCRIPT
+chmod +x /home/coder/test-direct.py
+
+# Install filebrowser
 curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
 filebrowser --noauth --root /home/coder --port 13339 >/tmp/filebrowser.log 2>&1 &
+
+# Create a helper script to check Selenium status
+cat > /home/coder/check-selenium.sh << 'SCRIPT'
+#!/bin/bash
+echo "=== Selenium Status Check ==="
+echo "Chrome version:"
+google-chrome --version
+echo -e "\nChromeDriver version:"
+/home/coder/selenium-drivers/chromedriver --version
+echo -e "\nSelenium processes:"
+ps aux | grep -E "(java|selenium)" | grep -v grep
+echo -e "\nSelenium Grid status:"
+curl -s http://localhost:4444/wd/hub/status | jq . || echo "Grid not responding"
+echo -e "\nLast 20 lines of Selenium log:"
+tail -n 20 /home/coder/selenium.log
+SCRIPT
+chmod +x /home/coder/check-selenium.sh
+
+echo "Selenium setup complete! Test with: ./test-selenium.py"
+echo "Check status with: ./check-selenium.sh"
   EOT  
 }
 
@@ -465,7 +710,7 @@ resource "kubernetes_deployment" "main" {
 
         container {
           name              = "coder-container"
-          image             = "codercom/enterprise-base:ubuntu"
+          image             = data.coder_parameter.image.value
           image_pull_policy = "Always"
           command           = [
             "sh", 
@@ -582,4 +827,3 @@ resource "coder_metadata" "workspace_info" {
     value = "${local.repo_owner_name}/${local.folder_name}"
   }   
 }
-
