@@ -827,3 +827,57 @@ resource "coder_metadata" "workspace_info" {
     value = "${local.repo_owner_name}/${local.folder_name}"
   }   
 }
+
+resource "coder_script" "selenium_testing" {
+  agent_id     = coder_agent.coder.id
+  display_name = "Selenium Testing"
+  icon         = "https://upload.wikimedia.org/wikipedia/commons/d/d5/Selenium_Logo.png"
+  run_on_start = true
+  script = <<EOF
+    #!/bin/bash
+    set -e
+    echo "Running Selenium Tests"
+    
+    # Wait for the startup script to complete and Selenium environment to be ready
+    while [ ! -f /home/coder/selenium-env/bin/activate ]; do
+      echo "Waiting for Selenium environment to be ready..."
+      sleep 5
+    done
+    
+    # Additional wait to ensure all services are up
+    sleep 10
+    
+    # Check if Selenium Grid is running
+    while ! curl -s http://localhost:4444/wd/hub/status > /dev/null 2>&1; do
+      echo "Waiting for Selenium Grid to start..."
+      sleep 5
+    done
+    
+    echo "Selenium Grid is ready!"
+    
+    # Clone the repository
+    cd /home/coder
+    rm -rf coder-selenium-testing
+    git clone https://github.com/dahr/coder-selenium-testing.git
+    cd /home/coder/coder-selenium-testing
+    
+    # Make scripts executable
+    chmod +x *.py
+    
+    # Run the tests using the selenium virtual environment's Python
+    echo "Running quick-selenium-demo.py..."
+    /home/coder/selenium-env/bin/python quick-selenium-demo.py
+    
+    echo "Running selenium-test-suite.py..."
+    /home/coder/selenium-env/bin/python selenium-test-suite.py
+    
+    echo "Running ecommerce-selenium-test.py..."
+    /home/coder/selenium-env/bin/python ecommerce-selenium-test.py
+    
+    echo "All Selenium tests completed!"
+    EOF
+  depends_on = [
+    coder_agent.coder
+  ]
+}
+
